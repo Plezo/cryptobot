@@ -53,6 +53,7 @@ var solanaAddressPattern = regexp.MustCompile(`[1-9A-HJ-NP-Za-km-z]{32,44}`)
 
 func init() {
 	flag.StringVar(&Token, "t", "", "Bot Token")
+	flag.StringVar(&RpcURL, "rpc", "https://api.mainnet-beta.solana.com", "Solana RPC Url")
 	flag.Parse()
 
 	client = rpc.New(RpcURL)
