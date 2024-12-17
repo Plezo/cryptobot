@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"regexp"
@@ -12,10 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
 )
 
 // Bot configuration
@@ -242,38 +245,46 @@ func validateSolanaAddress(address string) bool {
 
 func analyzeToken(address string) (*TokenAnalysis, error) {
 	pubkey, err := solana.PublicKeyFromBase58(address)
-	if err != nil {
-		return nil, err
-	}
+    if err != nil {
+        return nil, err
+    }
 
-	// Get token mint info
-	mintAcc, err := client.GetAccountInfo(
-		context.Background(),
-		pubkey,
-	)
-	if err != nil {
-		return nil, err
-	}
+    var mintAcc *rpc.GetAccountInfoResult
+    err = withRetry(3, func() error {
+        var err error
+        mintAcc, err = client.GetAccountInfo(
+            context.Background(),
+            pubkey,
+        )
+        return err
+    })
+    if err != nil {
+        return nil, err
+    }
 
-	// Parse mint account data to get decimals
-	var decimals uint8
-	if mintAcc != nil && mintAcc.Value != nil {
-		mintData := mintAcc.Value.Data.GetBinary()
-		if len(mintData) >= 44 { // Minimum size for a mint account
-			decimals = mintData[44] // Decimals is stored at offset 44
-		}
-	}
+    // Parse mint account data to get decimals
+    var decimals uint8
+    if mintAcc != nil && mintAcc.Value != nil {
+        mintData := mintAcc.Value.Data.GetBinary()
+        if len(mintData) >= 44 {
+            decimals = mintData[44]
+        }
+    }
 
-	// Get all token accounts with commitment type
-	accounts, err := client.GetTokenLargestAccounts(
-		context.Background(),
-		pubkey,
-		rpc.CommitmentFinalized,
-	)
-	if err != nil {
-		log.Printf("Error getting token accounts: %v", err)
-		return nil, err
-	}
+    var accounts *rpc.GetTokenLargestAccountsResult
+    err = withRetry(3, func() error {
+        var err error
+        accounts, err = client.GetTokenLargestAccounts(
+            context.Background(),
+            pubkey,
+            rpc.CommitmentFinalized,
+        )
+        return err
+    })
+    if err != nil {
+        log.Printf("Error getting token accounts after retries: %v", err)
+        return nil, err
+    }
 
 	var holders []TokenHolder
 	totalSupply := uint64(0)
@@ -504,3 +515,28 @@ func truncateAddress(address string) string {
 	}
 	return address[:6] + "..." + address[len(address)-4:]
 }
+
+// Add this retry helper function
+func withRetry(maxRetries int, operation func() error) error {
+    var err error
+    for i := 0; i < maxRetries; i++ {
+        err = operation()
+        if err == nil {
+            return nil
+        }
+
+        // Check if it's a rate limit error
+        if rpcErr, ok := err.(*jsonrpc.RPCError); ok && rpcErr.Code == 429 {
+            // Calculate delay with exponential backoff and jitter
+            delay := time.Duration(1<<uint(i)) * time.Second
+            jitter := time.Duration(rand.Int63n(1000)) * time.Millisecond
+            time.Sleep(delay + jitter)
+            continue
+        }
+        
+        // If it's not a rate limit error, return immediately
+        return err
+    }
+    return err
+}
+
